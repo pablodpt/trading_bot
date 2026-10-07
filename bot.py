@@ -1,31 +1,30 @@
-import yfinance as yf
-import pandas as pd
-import numpy as np
-import requests
-import time
-from datetime import datetime
 import os
-import requests
 import time
 from datetime import datetime
 from dotenv import load_dotenv
+import numpy as np
+import pandas as pd
+import requests
+import yfinance as yf
 
 # ================= CARGAR CREDENCIALES =================
-load_dotenv()  # Lee el archivo .env automáticamente
+load_dotenv()  # Lee .env localmente; en GitHub toma os.environ automáticamente
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# --- Validación: falla rápido si falta algo ---
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
     raise SystemExit(
         "❌ ERROR: Credenciales de Telegram no encontradas.\n"
-        "   1. Crea un archivo .env en la misma carpeta\n"
-        "   2. Añade TELEGRAM_TOKEN y TELEGRAM_CHAT_ID\n"
-        "   Ejemplo:\n"
-        "   TELEGRAM_TOKEN=123456:ABC-DEF...\n"
-        "   TELEGRAM_CHAT_ID=123456789"
+        "Asegúrate de configurar TELEGRAM_TOKEN y TELEGRAM_CHAT_ID en GitHub Secrets o en tu archivo .env."
     )
+
+TICKERS_SP500 = [
+    "MSFT", "NVDA", "GOOGL", "AMD",
+    "JPM", "V", "WMT", "XOM", "COST", 
+    "JNJ", "CRM", "TSM", "ASML", "MU", 
+    "SPY", "QQQ", "GLD", "TLT"
+]
 
 class TradingAgentScanner:
     def __init__(self, capital=10000):
@@ -35,35 +34,23 @@ class TradingAgentScanner:
 
     def enviar_alerta(self, mensaje):
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        try:TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-
-            resp = requests.post(url, data={
-                "chat_id": self.chat_id,
-                "text": mensaje,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True
-            }, timeout=10)
+        try:
+            resp = requests.post(
+                url,
+                data={
+                    "chat_id": self.chat_id,
+                    "text": mensaje,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True
+                },
+                timeout=10
+            )
             if resp.status_code != 200:
-                print(f"⚠️ Error Telegram: {resp.text}")
+                print(f"⚠️ Error Telegram: {resp.text}", flush=True)
         except Exception as e:
-            print(f"⚠️ Fallo envío: {e}")
+            print(f"⚠️ Fallo envío: {e}", flush=True)
 
-    # ... el resto de la clase igual que antes ...
-
-
-
-
-TICKERS_SP500 = [
-    "MSFT", "NVDA", "GOOGL","AMD",
-    "JPM", "V", "WMT", "XOM", "COST", 
-    "JNJ","CRM",
-    "TSM", "ASML",  "MU","SPY", "QQQ","GLD","TLT"
-    # ... agrega los que quieras (pueden ser cientos)
-]
-
-
-
-    # ================= INDICADORES (compactos) =================
+    # ================= INDICADORES =================
     def rsi(self, precios, periodo=14):
         delta = precios.diff()
         g = delta.clip(lower=0).rolling(periodo).mean()
@@ -78,8 +65,7 @@ TICKERS_SP500 = [
 
     def descargar(self, ticker):
         try:
-            df = yf.download(ticker, period="1y", auto_adjust=True,
-                             progress=False, threads=True)
+            df = yf.download(ticker, period="1y", auto_adjust=True, progress=False, threads=True)
             if df.empty or len(df) < 250:
                 return None
             df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
@@ -161,32 +147,29 @@ TICKERS_SP500 = [
         elif score <= -1:
             senal = "🔴 VENTA"
         else:
-            senal = None  # No alertar señales neutrales
+            senal = None
 
         return {
             "ticker": ticker, "score": score, "senal": senal,
-            "precio": u["Close"], "razones": razones,
-            "stop": u["Close"] - 2.5 * u["ATR"],
-            "target": u["Close"] + 2.5 * u["ATR"],
-            "rsi14": u["RSI14"]
+            "precio": float(u["Close"]), "razones": razones,
+            "stop": float(u["Close"] - 2.5 * u["ATR"]),
+            "target": float(u["Close"] + 2.5 * u["ATR"]),
+            "rsi14": float(u["RSI14"])
         }
 
     # ================= SCANNER CON ALERTAS =================
     def escanear_mercado(self, tickers, alertar=True):
-        print(f"\n🔍 Escaneando {len(tickers)} tickers... {datetime.now():%H:%M}")
+        print(f"\n🔍 Escaneando {len(tickers)} tickers... {datetime.now():%H:%M}", flush=True)
         señales = []
-        procesados = 0
 
         for i, ticker in enumerate(tickers, 1):
             resultado = self.analizar(ticker)
-            procesados += 1
-            if procesados % 10 == 0:
-                print(f"   ⏳ Progreso: {procesados}/{len(tickers)}")
+            if i % 10 == 0:
+                print(f"   ⏳ Progreso: {i}/{len(tickers)}", flush=True)
 
             if resultado and resultado["senal"]:
                 señales.append(resultado)
 
-            # Pausa anti-bloqueo de la API cada 20 tickers
             if i % 20 == 0:
                 time.sleep(1)
 
@@ -194,12 +177,12 @@ TICKERS_SP500 = [
         señales.sort(key=lambda x: x["score"], reverse=True)
 
         # Reporte en consola
-        print(f"\n{'='*55}\n📋 RESULTADOS — {datetime.now():%d/%m/%Y %H:%M}")
+        print(f"\n{'='*55}\n📋 RESULTADOS — {datetime.now():%d/%m/%Y %H:%M}", flush=True)
         if not señales:
-            print("   Sin señales. Mercado neutral.")
+            print("   Sin señales. Mercado neutral.", flush=True)
         for s in señales:
             print(f"{s['senal']} {s['ticker']} | Score {s['score']} | ${s['precio']:.2f} "
-                  f"| Stop s[′stop′]:.2f∣Target{s['stop']:.2f} | Targets[′stop′]:.2f∣Target{s['target']:.2f}")
+                  f"| Stop: ${s['stop']:.2f} | Target: ${s['target']:.2f}", flush=True)
 
         # 📱 ALERTA A TELEGRAM
         if alertar and señales:
@@ -213,10 +196,10 @@ TICKERS_SP500 = [
                f"🕐 {fecha}\n"
                f"🔍 {len(señales)} señales detectadas\n")
 
-        for s in señales[:10]:  # Máximo 10 por mensaje
+        for s in señales[:10]:
             msg += (f"\n{s['senal']} <b>{s['ticker']}</b> — Score {s['score']}/11\n"
                     f"   💰 Precio: ${s['precio']:.2f}\n"
-                    f"   🛑 Stop: s[′stop′]:.2f∣🎯Target:{s['stop']:.2f} | 🎯 Target:s[′stop′]:.2f∣🎯Target:{s['target']:.2f}\n")
+                    f"   🛑 Stop: ${s['stop']:.2f} | 🎯 Target: ${s['target']:.2f}\n")
             for r in s["razones"][:3]:
                 msg += f"   • {r}\n"
 
@@ -224,26 +207,11 @@ TICKERS_SP500 = [
                 "No es asesoría financiera.</i>")
 
         self.enviar_alerta(msg)
-        print("📱 Alerta enviada a Telegram ✅")
+        print("📱 Alerta enviada a Telegram ✅", flush=True)
 
 
-# ================= EJECUCIÓN =================
 if __name__ == "__main__":
     agente = TradingAgentScanner(capital=10000)
-
-    # --- MODO ÚNICO: escanea una vez ---
-    señales = agente.escanear_mercado(TICKERS_SP500)
-
-    # --- MODO AUTOMÁTICO: escanea cada hora, 24/7 ---
-    MODO_CONTINUO = False  # Cambia a True para vigilancia permanente
-
-    if MODO_CONTINUO:
-        agente.enviar_alerta("🤖 <b>Ox Alpha iniciado</b> — vigilancia activa ✅")
-        while True:
-            try:
-                agente.escanear_mercado(TICKERS_SP500, alertar=True)
-            except Exception as e:
-                print(f"Error: {e}")
-                agente.enviar_alerta(f"⚠️ Error en scanner: {e}")
-            print("\n💤 Esperando 60 minutos para el próximo escaneo...")
-            time.sleep(3600)
+    
+    # Modo de ejecución única (ideal para CRON / GitHub Actions)
+    agente.escanear_mercado(TICKERS_SP500, alertar=True)
