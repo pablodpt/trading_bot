@@ -65,12 +65,19 @@ class TradingAgentScanner:
 
     def descargar(self, ticker):
         try:
-            df = yf.download(ticker, period="1y", auto_adjust=True, progress=False, threads=True)
+            df = yf.download(ticker, period="1y", auto_adjust=True, progress=False, threads=False)
             if df.empty or len(df) < 250:
                 return None
-            df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+            
+            # Manejo del MultiIndex en columnas generado por versiones recientes de yfinance
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+            else:
+                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
+                
             return df
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ Error descargando {ticker}: {e}", flush=True)
             return None
 
     # ================= ANÁLISIS =================
@@ -97,46 +104,68 @@ class TradingAgentScanner:
         df["Momentum"] = df["Close"].pct_change(126)  # 6 meses
 
         u = df.iloc[-1]
-        if pd.isna(u["SMA200"]) or pd.isna(u["ATR"]):
+        
+        # Extracción segura de escalares evitando errores de MultiIndex / Series
+        close_val = float(u["Close"].item() if hasattr(u["Close"], "item") else u["Close"])
+        sma200_val = float(u["SMA200"].item() if hasattr(u["SMA200"], "item") else u["SMA200"]) if pd.notna(u["SMA200"]) else None
+        sma50_val = float(u["SMA50"].item() if hasattr(u["SMA50"], "item") else u["SMA50"]) if pd.notna(u["SMA50"]) else None
+        atr_val = float(u["ATR"].item() if hasattr(u["ATR"], "item") else u["ATR"]) if pd.notna(u["ATR"]) else None
+        vol_prom_val = float(u["Vol_prom"].item() if hasattr(u["Vol_prom"], "item") else u["Vol_prom"])
+        
+        if sma200_val is None or atr_val is None:
             return None
 
         # Filtro de liquidez: volumen mínimo $10M/día
-        if u["Close"] * u["Vol_prom"] < 10_000_000:
+        if close_val * vol_prom_val < 10_000_000:
             return None
+
+        # Extracción del resto de valores necesarios para condicionales
+        macd_val = float(u["MACD"].item() if hasattr(u["MACD"], "item") else u["MACD"])
+        macd_s_val = float(u["MACD_s"].item() if hasattr(u["MACD_s"], "item") else u["MACD_s"])
+        macd_prev = float(df["MACD"].iloc[-2].item() if hasattr(df["MACD"].iloc[-2], "item") else df["MACD"].iloc[-2])
+        macd_s_prev = float(df["MACD_s"].iloc[-2].item() if hasattr(df["MACD_s"].iloc[-2], "item") else df["MACD_s"].iloc[-2])
+        
+        rsi2_val = float(u["RSI2"].item() if hasattr(u["RSI2"], "item") else u["RSI2"])
+        rsi14_val = float(u["RSI14"].item() if hasattr(u["RSI14"], "item") else u["RSI14"])
+        bb_inf_val = float(u["BB_inf"].item() if hasattr(u["BB_inf"], "item") else u["BB_inf"])
+        momentum_val = float(u["Momentum"].item() if hasattr(u["Momentum"], "item") else u["Momentum"])
+        volume_val = float(u["Volume"].item() if hasattr(u["Volume"], "item") else u["Volume"])
+        
+        max55_prev = float(df["High"].rolling(55).max().iloc[-2].item() if hasattr(df["High"].rolling(55).max().iloc[-2], "item") else df["High"].rolling(55).max().iloc[-2])
 
         # --- SCORING MULTI-CONFLUENCIA ---
         score = 0
         razones = []
 
-        if u["Close"] > u["SMA200"] and u["SMA50"] > u["SMA200"]:
+        if close_val > sma200_val and sma50_val > sma200_val:
             score += 2; razones.append("Tendencia alcista (Golden Cross)")
-        elif u["Close"] > u["SMA200"]:
+        elif close_val > sma200_val:
             score += 1; razones.append("Sobre SMA200")
         else:
             score -= 2; razones.append("Bajo SMA200")
 
-        if u["MACD"] > u["MACD_s"] and df["MACD"].iloc[-2] <= df["MACD_s"].iloc[-2]:
+        if macd_val > macd_s_val and macd_prev <= macd_s_prev:
             score += 2; razones.append("⚡ Cruce MACD alcista (FRESCO)")
-        elif u["MACD"] > u["MACD_s"]:
+        elif macd_val > macd_s_val:
             score += 1; razones.append("MACD alcista")
         else:
             score -= 1
 
-        if u["RSI2"] < 5:
+        if rsi2_val < 5:
             score += 2; razones.append("Sobreventa extrema RSI2")
-        if u["RSI14"] < 30:
+        if rsi14_val < 30:
             score += 1; razones.append("RSI14 sobreventa")
 
-        if u["Close"] < u["BB_inf"]:
+        if close_val < bb_inf_val:
             score += 1; razones.append("Rebote Bollinger inferior")
 
-        if u["Momentum"] > 0.15:
-            score += 1; razones.append(f"Momentum 6m fuerte ({u['Momentum']*100:.0f}%)")
+        if momentum_val > 0.15:
+            score += 1; razones.append(f"Momentum 6m fuerte ({momentum_val*100:.0f}%)")
 
-        if u["Volume"] > 1.5 * u["Vol_prom"]:
+        if volume_val > 1.5 * vol_prom_val:
             score += 1; razones.append("Volumen 1.5x superior al promedio")
 
-        if u["Close"] > u["High"].rolling(55).max().iloc[-2]:
+        if close_val > max55_prev:
             score += 2; razones.append("⚡ BREAKOUT nuevo máximo 55d (FRESCO)")
 
         # --- SEÑAL FINAL ---
@@ -151,10 +180,10 @@ class TradingAgentScanner:
 
         return {
             "ticker": ticker, "score": score, "senal": senal,
-            "precio": float(u["Close"]), "razones": razones,
-            "stop": float(u["Close"] - 2.5 * u["ATR"]),
-            "target": float(u["Close"] + 2.5 * u["ATR"]),
-            "rsi14": float(u["RSI14"])
+            "precio": close_val, "razones": razones,
+            "stop": close_val - 2.5 * atr_val,
+            "target": close_val + 2.5 * atr_val,
+            "rsi14": rsi14_val
         }
 
     # ================= SCANNER CON ALERTAS =================
@@ -212,6 +241,4 @@ class TradingAgentScanner:
 
 if __name__ == "__main__":
     agente = TradingAgentScanner(capital=10000)
-    
-    # Modo de ejecución única (ideal para CRON / GitHub Actions)
     agente.escanear_mercado(TICKERS_SP500, alertar=True)
