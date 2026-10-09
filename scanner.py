@@ -8,7 +8,7 @@ import requests
 import yfinance as yf
 
 # ================= CARGAR CREDENCIALES =================
-load_dotenv()  # Lee .env localmente; en GitHub toma os.environ automáticamente
+load_dotenv()  # Carga local desde .env
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -46,92 +46,104 @@ class TradingAgentScanner:
                 timeout=10
             )
             if resp.status_code != 200:
-                print(f"⚠️ Error Telegram: {resp.text}", flush=True)
+                print(f"⚠️ Error Telegram (Status {resp.status_code}): {resp.text}", flush=True)
+            else:
+                print("📱 Alerta enviada a Telegram con éxito ✅", flush=True)
         except Exception as e:
-            print(f"⚠️ Fallo envío: {e}", flush=True)
+            print(f"⚠️ Fallo al conectar con Telegram: {e}", flush=True)
 
-    # ================= INDICADORES =================
+    # ================= INDICADORES OPTIMIZADOS =================
     def rsi(self, precios, periodo=14):
+        """Calcula el RSI utilizando la fórmula oficial de suavización de Wilder (EWM)."""
         delta = precios.diff()
-        g = delta.clip(lower=0).rolling(periodo).mean()
-        p = -delta.clip(upper=0).rolling(periodo).mean()
-        return 100 - 100 / (1 + g / p)
+        gain = delta.clip(lower=0)
+        loss = -delta.clip(upper=0)
+        
+        avg_gain = gain.ewm(alpha=1/periodo, adjust=False).mean()
+        avg_loss = loss.ewm(alpha=1/periodo, adjust=False).mean()
+        
+        rs = avg_gain / avg_loss
+        return 100 - (100 / (1 + rs))
 
     def atr(self, df, periodo=14):
         hl = df["High"] - df["Low"]
         hc = (df["High"] - df["Close"].shift()).abs()
         lc = (df["Low"] - df["Close"].shift()).abs()
-        return pd.concat([hl, hc, lc], axis=1).max(axis=1).rolling(periodo).mean()
+        tr = pd.concat([hl, hc, lc], axis=1).max(axis=1)
+        return tr.ewm(alpha=1/periodo, adjust=False).mean()
 
-    def descargar(self, ticker):
+    # ================= DESCARGA EN LOTE (BATCH) =================
+    def descargar_lote(self, tickers):
+        """Descarga todos los tickers en una sola petición masiva a yfinance."""
+        print(f"📥 Descargando datos para {len(tickers)} tickers...", flush=True)
         try:
-            df = yf.download(ticker, period="1y", auto_adjust=True, progress=False, threads=False)
-            if df.empty or len(df) < 250:
-                return None
-            
-            # Manejo del MultiIndex en columnas generado por versiones recientes de yfinance
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
-            else:
-                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-                
-            return df
+            datos = yf.download(
+                tickers, 
+                period="1y", 
+                group_by="ticker", 
+                auto_adjust=True, 
+                progress=False, 
+                threads=True
+            )
+            return datos
         except Exception as e:
-            print(f"⚠️ Error descargando {ticker}: {e}", flush=True)
+            print(f"⚠️ Error en descarga masiva: {e}", flush=True)
             return None
 
-    # ================= ANÁLISIS =================
-    def analizar(self, ticker):
-        df = self.descargar(ticker)
-        if df is None:
+    # ================= ANÁLISIS POR TICKER =================
+    def analizar_df(self, ticker, df):
+        df = df.dropna(subset=["Close"])
+        if df.empty or len(df) < 200:
             return None
 
+        df = df.copy()
+        
         # Indicadores
         df["SMA50"] = df["Close"].rolling(50).mean()
         df["SMA200"] = df["Close"].rolling(200).mean()
         df["RSI2"] = self.rsi(df["Close"], 2)
         df["RSI14"] = self.rsi(df["Close"], 14)
         df["ATR"] = self.atr(df)
-        ema_r = df["Close"].ewm(span=12).mean()
-        ema_l = df["Close"].ewm(span=26).mean()
+        
+        ema_r = df["Close"].ewm(span=12, adjust=False).mean()
+        ema_l = df["Close"].ewm(span=26, adjust=False).mean()
         df["MACD"] = ema_r - ema_l
-        df["MACD_s"] = df["MACD"].ewm(span=9).mean()
+        df["MACD_s"] = df["MACD"].ewm(span=9, adjust=False).mean()
+        
         media = df["Close"].rolling(20).mean()
         std = df["Close"].rolling(20).std()
         df["BB_inf"] = media - 2 * std
-        df["BB_sup"] = media + 2 * std
         df["Vol_prom"] = df["Volume"].rolling(20).mean()
-        df["Momentum"] = df["Close"].pct_change(126)  # 6 meses
+        df["Momentum"] = df["Close"].pct_change(126)  # ~6 meses
 
         u = df.iloc[-1]
-        
-        # Extracción segura de escalares evitando errores de MultiIndex / Series
-        close_val = float(u["Close"].item() if hasattr(u["Close"], "item") else u["Close"])
-        sma200_val = float(u["SMA200"].item() if hasattr(u["SMA200"], "item") else u["SMA200"]) if pd.notna(u["SMA200"]) else None
-        sma50_val = float(u["SMA50"].item() if hasattr(u["SMA50"], "item") else u["SMA50"]) if pd.notna(u["SMA50"]) else None
-        atr_val = float(u["ATR"].item() if hasattr(u["ATR"], "item") else u["ATR"]) if pd.notna(u["ATR"]) else None
-        vol_prom_val = float(u["Vol_prom"].item() if hasattr(u["Vol_prom"], "item") else u["Vol_prom"])
-        
+
+        # Extracción segura de escalares
+        close_val = float(u["Close"])
+        sma200_val = float(u["SMA200"]) if pd.notna(u["SMA200"]) else None
+        sma50_val = float(u["SMA50"]) if pd.notna(u["SMA50"]) else None
+        atr_val = float(u["ATR"]) if pd.notna(u["ATR"]) else None
+        vol_prom_val = float(u["Vol_prom"]) if pd.notna(u["Vol_prom"]) else 0
+
         if sma200_val is None or atr_val is None:
             return None
 
-        # Filtro de liquidez: volumen mínimo $10M/día
+        # Filtro de liquidez ($10M negociados al día)
         if close_val * vol_prom_val < 10_000_000:
             return None
 
-        # Extracción del resto de valores necesarios para condicionales
-        macd_val = float(u["MACD"].item() if hasattr(u["MACD"], "item") else u["MACD"])
-        macd_s_val = float(u["MACD_s"].item() if hasattr(u["MACD_s"], "item") else u["MACD_s"])
-        macd_prev = float(df["MACD"].iloc[-2].item() if hasattr(df["MACD"].iloc[-2], "item") else df["MACD"].iloc[-2])
-        macd_s_prev = float(df["MACD_s"].iloc[-2].item() if hasattr(df["MACD_s"].iloc[-2], "item") else df["MACD_s"].iloc[-2])
-        
-        rsi2_val = float(u["RSI2"].item() if hasattr(u["RSI2"], "item") else u["RSI2"])
-        rsi14_val = float(u["RSI14"].item() if hasattr(u["RSI14"], "item") else u["RSI14"])
-        bb_inf_val = float(u["BB_inf"].item() if hasattr(u["BB_inf"], "item") else u["BB_inf"])
-        momentum_val = float(u["Momentum"].item() if hasattr(u["Momentum"], "item") else u["Momentum"])
-        volume_val = float(u["Volume"].item() if hasattr(u["Volume"], "item") else u["Volume"])
-        
-        max55_prev = float(df["High"].rolling(55).max().iloc[-2].item() if hasattr(df["High"].rolling(55).max().iloc[-2], "item") else df["High"].rolling(55).max().iloc[-2])
+        macd_val = float(u["MACD"])
+        macd_s_val = float(u["MACD_s"])
+        macd_prev = float(df["MACD"].iloc[-2])
+        macd_s_prev = float(df["MACD_s"].iloc[-2])
+
+        rsi2_val = float(u["RSI2"])
+        rsi14_val = float(u["RSI14"])
+        bb_inf_val = float(u["BB_inf"])
+        momentum_val = float(u["Momentum"])
+        volume_val = float(u["Volume"])
+
+        max55_prev = float(df["High"].rolling(55).max().iloc[-2])
 
         # --- SCORING MULTI-CONFLUENCIA ---
         score = 0
@@ -189,20 +201,24 @@ class TradingAgentScanner:
     # ================= SCANNER CON ALERTAS =================
     def escanear_mercado(self, tickers, alertar=True):
         print(f"\n🔍 Escaneando {len(tickers)} tickers... {datetime.now():%H:%M}", flush=True)
+        datos_masivos = self.descargar_lote(tickers)
+        
+        if datos_masivos is None:
+            print("❌ Error al recuperar datos de mercado.", flush=True)
+            return []
+
         señales = []
+        for ticker in tickers:
+            try:
+                # Extracción del DataFrame correspondiente al ticker según la estructura devuelta por yfinance
+                df_ticker = datos_masivos[ticker] if len(tickers) > 1 else datos_masivos
+                resultado = self.analizar_df(ticker, df_ticker)
+                if resultado and resultado["senal"]:
+                    señales.append(resultado)
+            except Exception as e:
+                print(f"⚠️ Error procesando {ticker}: {e}", flush=True)
 
-        for i, ticker in enumerate(tickers, 1):
-            resultado = self.analizar(ticker)
-            if i % 10 == 0:
-                print(f"   ⏳ Progreso: {i}/{len(tickers)}", flush=True)
-
-            if resultado and resultado["senal"]:
-                señales.append(resultado)
-
-            if i % 20 == 0:
-                time.sleep(1)
-
-        # Ordenar por score
+        # Ordenar por score descendente
         señales.sort(key=lambda x: x["score"], reverse=True)
 
         # Reporte en consola
@@ -214,29 +230,38 @@ class TradingAgentScanner:
                   f"| Stop: ${s['stop']:.2f} | Target: ${s['target']:.2f}", flush=True)
 
         # 📱 ALERTA A TELEGRAM
-        if alertar and señales:
-            self.alertar_señales(señales)
+        if alertar:
+            self.alertar_señales(señales, total_escaneados=len(tickers))
 
         return señales
 
-    def alertar_señales(self, señales):
+    def alertar_señales(self, señales, total_escaneados=0):
         fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
-        msg = (f"🤖 <b>OX ALPHA — ALERTA DE TRADING</b>\n"
-               f"🕐 {fecha}\n"
-               f"🔍 {len(señales)} señales detectadas\n")
+        
+        # CASO 1: Existen oportunidades de compra / venta
+        if señales:
+            msg = (f"🤖 <b>OX ALPHA — ALERTA DE TRADING</b>\n"
+                   f"🕐 {fecha}\n"
+                   f"🔍 {len(señales)} señales detectadas ({total_escaneados} activos)\n")
 
-        for s in señales[:10]:
-            msg += (f"\n{s['senal']} <b>{s['ticker']}</b> — Score {s['score']}/11\n"
-                    f"   💰 Precio: ${s['precio']:.2f}\n"
-                    f"   🛑 Stop: ${s['stop']:.2f} | 🎯 Target: ${s['target']:.2f}\n")
-            for r in s["razones"][:3]:
-                msg += f"   • {r}\n"
+            for s in señales[:10]:
+                msg += (f"\n{s['senal']} <b>{s['ticker']}</b> — Score {s['score']}/11\n"
+                        f"   💰 Precio: ${s['precio']:.2f}\n"
+                        f"   🛑 Stop: ${s['stop']:.2f} | 🎯 Target: ${s['target']:.2f}\n")
+                for r in s["razones"][:3]:
+                    msg += f"   • {r}\n"
 
-        msg += ("\n⚠️ <i>Gestión de riesgo: máx 2% por operación. "
-                "No es asesoría financiera.</i>")
+            msg += ("\n⚠️ <i>Gestión de riesgo: máx 2% por operación. "
+                    "No es asesoría financiera.</i>")
+        
+        # CASO 2: Mercado neutro (confirmación de funcionamiento)
+        else:
+            msg = (f"🤖 <b>OX ALPHA — REPORTE DE MERCADO</b>\n"
+                   f"🕐 {fecha}\n"
+                   f"🔍 Escaneo completado ({total_escaneados} activos).\n"
+                   f"ℹ️ <i>Sin señales operables. Mercado neutro o sin confluencia.</i>")
 
         self.enviar_alerta(msg)
-        print("📱 Alerta enviada a Telegram ✅", flush=True)
 
 
 if __name__ == "__main__":
