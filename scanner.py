@@ -8,7 +8,7 @@ import requests
 import yfinance as yf
 
 # ================= CARGAR CREDENCIALES =================
-load_dotenv()  # Carga local desde .env
+load_dotenv()  # Carga local desde archivo .env si existe
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -203,15 +203,24 @@ class TradingAgentScanner:
         print(f"\n🔍 Escaneando {len(tickers)} tickers... {datetime.now():%H:%M}", flush=True)
         datos_masivos = self.descargar_lote(tickers)
         
-        if datos_masivos is None:
+        if datos_masivos is None or datos_masivos.empty:
             print("❌ Error al recuperar datos de mercado.", flush=True)
             return []
 
         señales = []
         for ticker in tickers:
             try:
-                # Extracción del DataFrame correspondiente al ticker según la estructura devuelta por yfinance
-                df_ticker = datos_masivos[ticker] if len(tickers) > 1 else datos_masivos
+                # Extrae el DataFrame individual gestionando el MultiIndex de yfinance
+                if isinstance(datos_masivos.columns, pd.MultiIndex):
+                    if ticker in datos_masivos.columns.get_level_values(0):
+                        df_ticker = datos_masivos[ticker]
+                    elif ticker in datos_masivos.columns.get_level_values(1):
+                        df_ticker = datos_masivos.xs(ticker, axis=1, level=1)
+                    else:
+                        continue
+                else:
+                    df_ticker = datos_masivos
+
                 resultado = self.analizar_df(ticker, df_ticker)
                 if resultado and resultado["senal"]:
                     señales.append(resultado)
@@ -229,7 +238,7 @@ class TradingAgentScanner:
             print(f"{s['senal']} {s['ticker']} | Score {s['score']} | ${s['precio']:.2f} "
                   f"| Stop: ${s['stop']:.2f} | Target: ${s['target']:.2f}", flush=True)
 
-        # 📱 ALERTA A TELEGRAM
+        # 📱 ALERTA A TELEGRAM (Envía reporte o aviso de mercado neutro)
         if alertar:
             self.alertar_señales(señales, total_escaneados=len(tickers))
 
@@ -238,7 +247,7 @@ class TradingAgentScanner:
     def alertar_señales(self, señales, total_escaneados=0):
         fecha = datetime.now().strftime("%d/%m/%Y %H:%M")
         
-        # CASO 1: Existen oportunidades de compra / venta
+        # CASO 1: Oportunidades detectadas
         if señales:
             msg = (f"🤖 <b>OX ALPHA — ALERTA DE TRADING</b>\n"
                    f"🕐 {fecha}\n"
@@ -254,7 +263,7 @@ class TradingAgentScanner:
             msg += ("\n⚠️ <i>Gestión de riesgo: máx 2% por operación. "
                     "No es asesoría financiera.</i>")
         
-        # CASO 2: Mercado neutro (confirmación de funcionamiento)
+        # CASO 2: Confirmación de funcionamiento (Mercado Neutro)
         else:
             msg = (f"🤖 <b>OX ALPHA — REPORTE DE MERCADO</b>\n"
                    f"🕐 {fecha}\n"
